@@ -1,20 +1,17 @@
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
 
-#[openbrush::implementation(Ownable, AccessControl)]
-#[openbrush::contract]
+#[ink::contract]
 pub mod price_feed_consumer {
-    use ink::codegen::{EmitEvent, Env};
     use ink::prelude::string::String;
     use ink::prelude::vec::Vec;
     use ink::storage::Mapping;
-    use openbrush::contracts::access_control::*;
-    use openbrush::contracts::ownable::*;
-    use openbrush::traits::Storage;
-    use scale::{Decode, Encode};
-
-    use phat_rollup_anchor_ink::traits::{
-        meta_transaction, meta_transaction::*, rollup_anchor, rollup_anchor::*,
-    };
+    use ink_client_lib::traits::access_control::{AccessControl, AccessControlData, AccessControlError, AccessControlStorage, BaseAccessControl, RoleType};
+    use ink_client_lib::traits::kv_store::{Key, KvStore, KvStoreData, KvStoreStorage, Value};
+    use ink_client_lib::traits::message_queue::{MessageQueue, QueueIndex};
+    use ink_client_lib::traits::ownable::{BaseOwnable, Ownable, OwnableData, OwnableError, OwnableStorage};
+    use ink_client_lib::traits::rollup_client::{BaseRollupAnchor, HandleActionInput, RollupClient, ATTESTOR_ROLE};
+    use ink_client_lib::traits::RollupClientError;
+    use ink::codegen::Env;
 
     pub type TradingPairId = u32;
 
@@ -27,7 +24,7 @@ pub mod price_feed_consumer {
         price: u128,
     }
 
-    /// Events emitted when a error is received
+    /// Events emitted when an error is received
     #[ink(event)]
     pub struct ErrorReceived {
         trading_pair_id: TradingPairId,
@@ -35,12 +32,12 @@ pub mod price_feed_consumer {
     }
 
     /// Errors occurred in the contract
-    #[derive(Encode, Decode, Debug)]
-    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    #[derive(Debug, Eq, PartialEq)]
+    #[ink::scale_derive(Encode, Decode, TypeInfo)]
+    #[allow(clippy::cast_possible_truncation)]
     pub enum ContractError {
         AccessControlError(AccessControlError),
-        RollupAnchorError(RollupAnchorError),
-        MetaTransactionError(MetaTransactionError),
+        RollupClientError(RollupClientError),
         MissingTradingPair,
     }
     /// convertor from AccessControlError to ContractError
@@ -49,22 +46,16 @@ pub mod price_feed_consumer {
             ContractError::AccessControlError(error)
         }
     }
-    /// convertor from RollupAnchorError to ContractError
-    impl From<RollupAnchorError> for ContractError {
-        fn from(error: RollupAnchorError) -> Self {
-            ContractError::RollupAnchorError(error)
-        }
-    }
-    /// convertor from MetaTxError to ContractError
-    impl From<MetaTransactionError> for ContractError {
-        fn from(error: MetaTransactionError) -> Self {
-            ContractError::MetaTransactionError(error)
+    /// convertor from RollupClientError to ContractError
+    impl From<RollupClientError> for ContractError {
+        fn from(error: RollupClientError) -> Self {
+            ContractError::RollupClientError(error)
         }
     }
 
     /// Message to request the price of the trading pair
     /// message pushed in the queue by this contract and read by the offchain rollup
-    #[derive(Encode, Decode)]
+    #[ink::scale_derive(Encode, Decode)]
     struct PriceRequestMessage {
         /// id of the pair (use as key in the Mapping)
         trading_pair_id: TradingPairId,
@@ -75,7 +66,7 @@ pub mod price_feed_consumer {
     }
     /// Message sent to provide the price of the trading pair
     /// response pushed in the queue by the offchain rollup and read by this contract
-    #[derive(Encode, Decode)]
+    #[ink::scale_derive(Encode, Decode)]
     struct PriceResponseMessage {
         /// Type of response
         resp_type: u8,
@@ -93,10 +84,11 @@ pub mod price_feed_consumer {
     const TYPE_FEED: u8 = 11;
 
     /// Data storage
-    #[derive(Encode, Decode, Default, Eq, PartialEq, Clone, Debug)]
+    #[derive(Default, Eq, PartialEq, Clone, Debug)]
+    #[ink::scale_derive(Encode, Decode, TypeInfo)]
     #[cfg_attr(
         feature = "std",
-        derive(scale_info::TypeInfo, ink::storage::traits::StorageLayout)
+        derive(ink::storage::traits::StorageLayout)
     )]
     pub struct TradingPair {
         /// trading pair like 'polkdatot/usd'
@@ -111,37 +103,33 @@ pub mod price_feed_consumer {
         last_update: u64,
     }
 
+    #[derive(Default, Debug)]
     #[ink(storage)]
-    #[derive(Default, Storage)]
-    pub struct TestOracle {
-        #[storage_field]
-        ownable: ownable::Data,
-        #[storage_field]
-        access: access_control::Data,
-        #[storage_field]
-        rollup_anchor: rollup_anchor::Data,
-        #[storage_field]
-        meta_transaction: meta_transaction::Data,
+    pub struct PriceFeedConsumer {
+        ownable : OwnableData,
+        access_control : AccessControlData,
+        kv_store : KvStoreData,
         trading_pairs: Mapping<TradingPairId, TradingPair>,
     }
 
-    impl TestOracle {
+    impl PriceFeedConsumer {
+
         #[ink(constructor)]
         pub fn new() -> Self {
             let mut instance = Self::default();
             let caller = instance.env().caller();
             // set the owner of this contract
-            ownable::Internal::_init_with_owner(&mut instance, caller);
+            BaseOwnable::init_with_owner(&mut instance, caller);
             // set the admin of this contract
-            access_control::Internal::_init_with_admin(&mut instance, Some(caller));
+            BaseAccessControl::init_with_admin(&mut instance, caller);
             // grant the role manager
-            AccessControl::grant_role(&mut instance, MANAGER_ROLE, Some(caller))
+            BaseAccessControl::inner_grant_role(&mut instance, MANAGER_ROLE, caller)
                 .expect("Should grant the role MANAGER_ROLE");
             instance
         }
 
         #[ink(message)]
-        #[openbrush::modifiers(access_control::only_role(MANAGER_ROLE))]
+        //#[openbrush::modifiers(access_control::only_role(MANAGER_ROLE))]
         pub fn create_trading_pair(
             &mut self,
             trading_pair_id: TradingPairId,
@@ -161,7 +149,7 @@ pub mod price_feed_consumer {
         }
 
         #[ink(message)]
-        #[openbrush::modifiers(access_control::only_role(MANAGER_ROLE))]
+        //#[openbrush::modifiers(access_control::only_role(MANAGER_ROLE))]
         pub fn request_price(
             &mut self,
             trading_pair_id: TradingPairId,
@@ -189,7 +177,7 @@ pub mod price_feed_consumer {
 
         #[ink(message)]
         pub fn register_attestor(&mut self, account_id: AccountId) -> Result<(), ContractError> {
-            AccessControl::grant_role(self, ATTESTOR_ROLE, Some(account_id))?;
+            AccessControl::grant_role(self, ATTESTOR_ROLE, account_id)?;
             Ok(())
         }
 
@@ -204,14 +192,99 @@ pub mod price_feed_consumer {
         }
     }
 
-    impl RollupAnchor for TestOracle {}
-    impl MetaTransaction for TestOracle {}
 
-    impl rollup_anchor::MessageHandler for TestOracle {
-        fn on_message_received(&mut self, action: Vec<u8>) -> Result<(), RollupAnchorError> {
+
+
+    impl OwnableStorage for PriceFeedConsumer {
+        fn get_storage(&self) -> &OwnableData {
+            &self.ownable
+        }
+
+        fn get_mut_storage(&mut self) -> &mut OwnableData {
+            &mut self.ownable
+        }
+    }
+
+    impl BaseOwnable for PriceFeedConsumer {}
+
+    impl Ownable for PriceFeedConsumer {
+        #[ink(message)]
+        fn get_owner(&self) -> Option<AccountId> {
+            self.inner_get_owner()
+        }
+
+        #[ink(message)]
+        fn renounce_ownership(&mut self) -> Result<(), OwnableError> {
+            self.inner_renounce_ownership()
+        }
+
+        #[ink(message)]
+        fn transfer_ownership(&mut self, new_owner: Option<AccountId>) -> Result<(), OwnableError> {
+            self.inner_transfer_ownership(new_owner)
+        }
+    }
+
+    impl AccessControlStorage for PriceFeedConsumer {
+        fn get_storage(&self) -> &AccessControlData {
+            &self.access_control
+        }
+
+        fn get_mut_storage(&mut self) -> &mut AccessControlData {
+            &mut self.access_control
+        }
+    }
+
+    impl BaseAccessControl for PriceFeedConsumer {}
+
+    impl AccessControl for PriceFeedConsumer {
+        #[ink(message)]
+        fn has_role(&self, role: RoleType, account: AccountId) -> bool {
+            self.inner_has_role(role, account)
+        }
+
+        #[ink(message)]
+        fn grant_role(
+            &mut self,
+            role: RoleType,
+            account: AccountId,
+        ) -> Result<(), AccessControlError> {
+            self.inner_grant_role(role, account)
+        }
+
+        #[ink(message)]
+        fn revoke_role(
+            &mut self,
+            role: RoleType,
+            account: AccountId,
+        ) -> Result<(), AccessControlError> {
+            self.inner_revoke_role(role, account)
+        }
+
+        #[ink(message)]
+        fn renounce_role(&mut self, role: RoleType) -> Result<(), AccessControlError> {
+            self.inner_renounce_role(role)
+        }
+    }
+
+    impl KvStoreStorage for PriceFeedConsumer {
+        fn get_storage(&self) -> &KvStoreData {
+            &self.kv_store
+        }
+
+        fn get_mut_storage(&mut self) -> &mut KvStoreData {
+            &mut self.kv_store
+        }
+    }
+
+    impl KvStore for PriceFeedConsumer {}
+
+    impl MessageQueue for PriceFeedConsumer {}
+
+    impl BaseRollupAnchor for PriceFeedConsumer {
+        fn on_message_received(&mut self, action: Vec<u8>) -> Result<(), RollupClientError> {
             // parse the response
             let message: PriceResponseMessage =
-                Decode::decode(&mut &action[..]).or(Err(RollupAnchorError::FailedToDecode))?;
+                ink::scale::Decode::decode(&mut &action[..]).or(Err(RollupClientError::FailedToDecode))?;
 
             // handle the response
             if message.resp_type == TYPE_RESPONSE || message.resp_type == TYPE_FEED {
@@ -222,7 +295,7 @@ pub mod price_feed_consumer {
                     .get(message.trading_pair_id)
                     .unwrap_or_default();
                 trading_pair.value = message.price.unwrap_or_default();
-                trading_pair.nb_updates += 1;
+                trading_pair.nb_updates.checked_add(1).ok_or(RollupClientError::FailedToDecode)?; // TODO improve the error
                 trading_pair.last_update = self.env().block_timestamp();
                 self.trading_pairs
                     .insert(message.trading_pair_id, &trading_pair);
@@ -240,45 +313,35 @@ pub mod price_feed_consumer {
                 });
             } else {
                 // response type unknown
-                return Err(RollupAnchorError::UnsupportedAction);
+                return Err(RollupClientError::UnsupportedAction);
             }
 
             Ok(())
         }
     }
 
-    /// Events emitted when a message is pushed in the queue
-    #[ink(event)]
-    pub struct MessageQueued {
-        pub id: u32,
-        pub data: Vec<u8>,
-    }
-
-    /// Events emitted when a message is proceed
-    #[ink(event)]
-    pub struct MessageProcessedTo {
-        pub id: u32,
-    }
-
-    impl rollup_anchor::EventBroadcaster for TestOracle {
-        fn emit_event_message_queued(&self, id: u32, data: Vec<u8>) {
-            self.env().emit_event(MessageQueued { id, data });
+    impl RollupClient for PriceFeedConsumer {
+        #[ink(message)]
+        fn get_value(&self, key: Key) -> Option<Value> {
+            self.inner_get_value(&key)
         }
 
-        fn emit_event_message_processed_to(&self, id: u32) {
-            self.env().emit_event(MessageProcessedTo { id });
+        #[ink(message)]
+        fn has_message(&self) -> Result<bool, RollupClientError> {
+            MessageQueue::has_message(self)
         }
-    }
 
-    impl meta_transaction::EventBroadcaster for TestOracle {
-        fn emit_event_meta_tx_decoded(&self) {
-            self.env().emit_event(MetaTxDecoded {});
+        #[ink(message)]
+        fn rollup_cond_eq(
+            &mut self,
+            conditions: Vec<(Key, Option<Value>)>,
+            updates: Vec<(Key, Option<Value>)>,
+            actions: Vec<HandleActionInput>,
+        ) -> Result<(), RollupClientError> {
+            self.inner_rollup_cond_eq(conditions, updates, actions)
         }
     }
 
-    /// Events emitted when a meta transaction is decoded
-    #[ink(event)]
-    pub struct MetaTxDecoded {}
 
     #[cfg(all(test, feature = "e2e-tests"))]
     mod e2e_tests {
