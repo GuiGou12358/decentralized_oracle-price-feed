@@ -1,0 +1,24 @@
+{
+  "name": "phala-cloud-feed-ink5-contract",
+  "module": "src/index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "bun run --hot src/index.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@phala/dstack-sdk": "^0.1.10",
+    "bree": "^9.2.4",
+    "node-cron": "^3.0.3",
+    "viem": "^2.23.5",
+    "@guigou/sc-rollup-core": "0.0.3-beta43",
+    "@guigou/sc-rollup-ink5": "0.0.3-beta43",
+    "polkadot-api": "1.9.7"
+  }
+}
