@@ -2,7 +2,6 @@ import {serve} from "bun";
 import {TappdClient} from "@phala/dstack-sdk";
 import {Keyring} from "@polkadot/keyring";
 import type {KeyringPair} from "@polkadot/keyring/types";
-import {InkClient} from "@guigou/sc-rollup-ink5";
 import cron from "node-cron";
 import {fetchCoingeckoPrices} from "./coingecko-api.ts";
 import type {InkClientConfig, PriceRequestMessage} from "./types.ts";
@@ -19,6 +18,30 @@ async function getSubstrateKeyringPair(client: TappdClient) : Promise<KeyringPai
   const bytes = result.asUint8Array(32)
   return new Keyring({type: 'sr25519'}).addFromSeed(bytes);
 }
+
+async function getInkClientConfig() : Promise<InkClientConfig> {
+
+  if (!inkClientRpc || !inkClientAddress){
+    console.log('Missing configuration!');
+    throw new Error('Missing configuration!');
+  }
+  if (pk){
+    return {
+      rpc: inkClientRpc,
+      address: inkClientAddress,
+      pk: pk,
+    };
+  }
+
+  const client = new TappdClient();
+  const keypair = await getSubstrateKeyringPair(client);
+  return {
+    rpc: inkClientRpc,
+    address: inkClientAddress,
+    pk: keypair,
+  };
+}
+
 
 serve({
   port,
@@ -59,32 +82,29 @@ serve({
       }));
     },
 
-    "/feed": async (req) => {
-
-      const client = new TappdClient();
-      const keypair = await getSubstrateKeyringPair(client);
-
-      const inkClient = new InkClient(inkClientRpc, inkClientAddress, pk);
-      await inkClient.startSession();
-      inkClient.addAction('0x00');
-      const tx = await inkClient.commit();
-
-      return new Response(JSON.stringify(tx));
+    "/fetch_prices": async (req) => {
+      const tradingPairs = getTradingPairs();
+      const prices = await fetchCoingeckoPrices(tradingPairs);
+      return new Response(JSON.stringify({prices}));
     },
 
-    "/poll_message": async (req) => {
-
-      const tx = await poolMessage();
-      return new Response(JSON.stringify(tx));
+    "/feed_prices": async (req) => {
+      const config = await getInkClientConfig();
+      const tradingPairs = getTradingPairs();
+      const tx = await feedPrices(config, tradingPairs);
+      return new Response(JSON.stringify({tx}));
     },
 
-    "/start_polling": async (req) => {
+    "/start_feeding_prices": async (req) => {
 
       console.log('Message polling enabled');
 
       const task = cron.schedule('*/5 * * * *',
         async () => {
-          await poolMessage();
+          const config = await getInkClientConfig();
+          const tradingPairs = getTradingPairs();
+          const tx = await feedPrices(config, tradingPairs);
+          console.log('tx:' + tx);
         });
       task.start();
 
@@ -96,33 +116,8 @@ serve({
       const tasks = cron.getTasks();
       return new Response(JSON.stringify({tasks}));
     },
-
-    "/fetch_prices": async (req) => {
-
-      const tradingPairs = getTradingPairs();
-      const prices = await fetchCoingeckoPrices(tradingPairs);
-      return new Response(JSON.stringify({prices}));
-    },
-
-    "/feed_prices": async (req) => {
-
-      if (!inkClientRpc || !inkClientAddress || !pk){
-        console.log('Missing configuration!');
-        return;
-      }
-
-      const config : InkClientConfig = {
-        rpc: inkClientRpc,
-        address : inkClientAddress,
-        pk,
-      }
-      const tradingPairs = getTradingPairs();
-      const tx = await feedPrices(config, tradingPairs);
-      return new Response(JSON.stringify({tx}));
-    },
   },
 });
-
 
 
 const getTradingPairs = () : PriceRequestMessage[] => {
@@ -133,34 +128,4 @@ const getTradingPairs = () : PriceRequestMessage[] => {
     {token0: "kusama", token1: "usd", tradingPairId: 5},
   ];
 }
-
-const poolMessage = async ()=> {
-
-
-  if (!inkClientRpc || !inkClientAddress || !pk){
-    console.log('Missing configuration!');
-    return;
-  }
-
-  console.log('Poll message ...');
-
-  const inkClient = new InkClient(inkClientRpc, inkClientAddress, pk);
-  await inkClient.startSession();
-
-  const tail = await inkClient.getQueueTailIndex();
-  console.log('Tail Index: ' + tail);
-  const head = await inkClient.getQueueHeadIndex();
-  console.log('Head Index: ' + head);
-  const hasMessage = await inkClient.hasMessage();
-  console.log('hasMessage : ' + hasMessage);
-
-  let message;
-  do {
-    message = await inkClient.pollMessage();
-    console.log('message %s', message);
-  } while (message.isSome());
-
-  await inkClient.commit();
-}
-
 
