@@ -295,7 +295,9 @@ pub mod price_feed_consumer {
                     .get(message.trading_pair_id)
                     .unwrap_or_default();
                 trading_pair.value = message.price.unwrap_or_default();
-                trading_pair.nb_updates.checked_add(1).ok_or(RollupClientError::FailedToDecode)?; // TODO improve the error
+                trading_pair.nb_updates = trading_pair.nb_updates
+                    .checked_add(1)
+                    .ok_or(RollupClientError::RuntimeError(0))?; // TODO improve the error
                 trading_pair.last_update = self.env().block_timestamp();
                 self.trading_pairs
                     .insert(message.trading_pair_id, &trading_pair);
